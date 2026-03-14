@@ -14,7 +14,7 @@ RUN yarn install --frozen-lockfile
 COPY . .
 
 # Билдим NestJS проект
-RUN npx tsc --noEmit false
+RUN yarn build
 
 
 # ---------- PRODUCTION ----------
