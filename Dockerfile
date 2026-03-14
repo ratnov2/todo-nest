@@ -5,10 +5,8 @@ FROM node:20
 WORKDIR /usr/src/app
 
 # Копируем package.json и package-lock.json
-COPY package*.json ./
-
-# Устанавливаем зависимости
-RUN npm install
+COPY package.json yarn.lock ./
+RUN yarn install --frozen-lockfile
 
 # Копируем весь проект
 COPY . .
