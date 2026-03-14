@@ -10,6 +10,16 @@ COPY package.json yarn.lock ./
 # Устанавливаем dev зависимости
 RUN yarn install --frozen-lockfile
 
+# 2️⃣ prisma schema (для генерации клиента)
+COPY prisma ./prisma
+
+# переменная нужна только чтобы prisma generate не падал
+ARG DATABASE_URL_LOCAL="postgresql://localhost:5432/stub"
+ENV DATABASE_URL_LOCAL=$DATABASE_URL_LOCAL
+
+# 3️⃣ генерируем Prisma Client
+RUN npx prisma generate
+
 # Копируем проект
 COPY . .
 
@@ -28,11 +38,14 @@ COPY package.json yarn.lock ./
 # Устанавливаем только production зависимости
 RUN yarn install --production --frozen-lockfile
  
-# Копируем билд и Prisma client из builder
 COPY --from=builder /app/dist ./dist
+
+# prisma schema
+COPY prisma ./prisma
+
+# prisma client
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-COPY prisma ./prisma
     
 # Экспортируем порт приложения
 EXPOSE 3000
