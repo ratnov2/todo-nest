@@ -53,4 +53,4 @@ COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 EXPOSE 3000
     
 # Используем ENV из .env на runtime
-CMD ["node", "dist/src/main.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy && npx prisma generate && node dist/src/main.js"]
