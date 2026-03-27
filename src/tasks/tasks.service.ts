@@ -285,49 +285,75 @@ export class TasksService {
     const now = new Date();
 
     const endOfToday = new Date(now);
-    endOfToday.setHours(23, 59, 59, 999);
+    endOfToday.setUTCHours(23, 59, 59, 999);
 
-    // 📌 Schedule aggregates (общий прогресс за все дни задачи до конца сегодняшнего дня)
-    // Мы считаем по TaskInstance.occurrenceAt, т.к. в схеме нет startDate/endDate у TaskSchedule.
+    // 📌 Schedule target days (сколько “дней/вхождений” расписания приходится на период до конца сегодня)
+    // Важно: нельзя опираться только на созданные TaskInstance, т.к. ты можешь пропустить день и instance не создастся.
+    // Поэтому считаем occurrences по правилам TaskSchedule.
+    const taskIdToScheduleOccurrencesCount = new Map<number, number>();
+
+    for (const t of flatItems) {
+      if (taskIdToScheduleOccurrencesCount.has(t.id)) continue;
+
+      const schedules = Array.isArray(t.schedules) ? t.schedules : [];
+      let occurrences = 0;
+
+      for (const s of schedules) {
+        if (!s) continue;
+
+        // cursor = start - 1ms, чтобы computeNextOccurrence вернул первое вхождение на start
+        const runAtRaw = (s as any).runAt;
+        const scheduleStart = runAtRaw
+          ? runAtRaw instanceof Date
+            ? runAtRaw
+            : new Date(runAtRaw)
+          : null;
+
+        const cursorStart = scheduleStart ? new Date(scheduleStart.getTime() - 1) : now;
+
+        let cursor = cursorStart;
+        let next = computeNextOccurrence(s as any, cursor);
+        let guard = 0;
+
+        // safety cap: на “до конца сегодня” обычно не больше пары сотен
+        while (next && next.getTime() <= endOfToday.getTime() && guard < 500) {
+          occurrences += 1;
+          cursor = next;
+          next = computeNextOccurrence(s as any, cursor);
+          guard += 1;
+        }
+      }
+
+      taskIdToScheduleOccurrencesCount.set(t.id, occurrences);
+    }
+
+    // 📌 Schedule aggregates
+    // doneSoFar: сумма ProgressEntry.amount по groupDate (если задан), иначе по createdAt.
+    // Это важно, потому что при пропуске дня instance может не создаться, и тогда прогресс
+    // приходит без taskInstanceId, но groupDate всё равно известен.
     const instancesUntilToday = await this.db.taskInstance.findMany({
       where: {
         taskId: { in: taskIds },
         occurrenceAt: { lte: endOfToday },
       },
-      select: { id: true, taskId: true },
+      select: { taskId: true },
     });
 
     const taskIdToDaysCount = new Map<number, number>();
-    const instanceIdToTaskId = new Map<number, number>();
-
     for (const inst of instancesUntilToday) {
-      instanceIdToTaskId.set(inst.id, inst.taskId);
-      taskIdToDaysCount.set(inst.taskId, (taskIdToDaysCount.get(inst.taskId) ?? 0) + 1);
+      taskIdToDaysCount.set(
+        inst.taskId,
+        (taskIdToDaysCount.get(inst.taskId) ?? 0) + 1,
+      );
     }
 
-    const instanceIdsUntilToday = instancesUntilToday.map((i) => i.id);
-
-    const entriesUntilToday = instanceIdsUntilToday.length
-      ? await this.db.progressEntry.findMany({
-          where: {
-            taskInstanceId: { in: instanceIdsUntilToday },
-          },
-          select: {
-            taskInstanceId: true,
-            amount: true,
-          },
-        })
-      : [];
-
-    // Важно:
-    // Если инстанс за день не был создан (или UI отправил прогресс без instanceId),
-    // то taskInstanceId у ProgressEntry будет null. Тогда doneSoFar нужно всё равно учитывать.
-    // Оцениваем “за всё до конца сегодня” по createdAt.
-    const unassignedEntriesUntilToday = await this.db.progressEntry.findMany({
+    const scheduleEntriesUntilToday = await this.db.progressEntry.findMany({
       where: {
         taskId: { in: taskIds },
-        taskInstanceId: null,
-        createdAt: { lte: endOfToday },
+        OR: [
+          { groupDate: { lte: endOfToday } },
+          { groupDate: null, createdAt: { lte: endOfToday } },
+        ],
       },
       select: {
         taskId: true,
@@ -336,16 +362,11 @@ export class TasksService {
     });
 
     const taskIdToDoneSoFar = new Map<number, number>();
-    for (const e of entriesUntilToday) {
-      if (!e.taskInstanceId) continue;
-      const taskId = instanceIdToTaskId.get(e.taskInstanceId);
-      if (!taskId) continue;
-      taskIdToDoneSoFar.set(taskId, (taskIdToDoneSoFar.get(taskId) ?? 0) + e.amount);
-    }
-
-    for (const e of unassignedEntriesUntilToday) {
-      const prev = taskIdToDoneSoFar.get(e.taskId) ?? 0;
-      taskIdToDoneSoFar.set(e.taskId, prev + e.amount);
+    for (const e of scheduleEntriesUntilToday) {
+      taskIdToDoneSoFar.set(
+        e.taskId,
+        (taskIdToDoneSoFar.get(e.taskId) ?? 0) + e.amount,
+      );
     }
 
     // 🔥 1. Получаем ближайшие instance (то, что используется для UI “сегодня/текущий инстанс”)
@@ -401,7 +422,7 @@ export class TasksService {
         const total = instEntries.reduce((sum, e) => sum + e.amount, 0);
 
         // Для SCHEDULED покажем ещё общий прогресс за все дни до конца сегодня
-        const scheduleDaysCount = taskIdToDaysCount.get(instance.taskId) ?? 0;
+        const scheduleDaysCount = taskIdToScheduleOccurrencesCount.get(instance.taskId) ?? 0;
         const scheduleDoneSoFar = taskIdToDoneSoFar.get(instance.taskId) ?? 0;
         const dailyTarget = node.progressMeta?.targetValue ?? 0;
         const scheduleTargetSoFar = dailyTarget * scheduleDaysCount;
