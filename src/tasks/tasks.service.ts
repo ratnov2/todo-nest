@@ -284,7 +284,50 @@ export class TasksService {
 
     const now = new Date();
 
-    // 🔥 1. Получаем ближайшие instance
+    const endOfToday = new Date(now);
+    endOfToday.setHours(23, 59, 59, 999);
+
+    // 📌 Schedule aggregates (общий прогресс за все дни задачи до конца сегодняшнего дня)
+    // Мы считаем по TaskInstance.occurrenceAt, т.к. в схеме нет startDate/endDate у TaskSchedule.
+    const instancesUntilToday = await this.db.taskInstance.findMany({
+      where: {
+        taskId: { in: taskIds },
+        occurrenceAt: { lte: endOfToday },
+      },
+      select: { id: true, taskId: true },
+    });
+
+    const taskIdToDaysCount = new Map<number, number>();
+    const instanceIdToTaskId = new Map<number, number>();
+
+    for (const inst of instancesUntilToday) {
+      instanceIdToTaskId.set(inst.id, inst.taskId);
+      taskIdToDaysCount.set(inst.taskId, (taskIdToDaysCount.get(inst.taskId) ?? 0) + 1);
+    }
+
+    const instanceIdsUntilToday = instancesUntilToday.map((i) => i.id);
+
+    const entriesUntilToday = instanceIdsUntilToday.length
+      ? await this.db.progressEntry.findMany({
+          where: {
+            taskInstanceId: { in: instanceIdsUntilToday },
+          },
+          select: {
+            taskInstanceId: true,
+            amount: true,
+          },
+        })
+      : [];
+
+    const taskIdToDoneSoFar = new Map<number, number>();
+    for (const e of entriesUntilToday) {
+      if (!e.taskInstanceId) continue;
+      const taskId = instanceIdToTaskId.get(e.taskInstanceId);
+      if (!taskId) continue;
+      taskIdToDoneSoFar.set(taskId, (taskIdToDoneSoFar.get(taskId) ?? 0) + e.amount);
+    }
+
+    // 🔥 1. Получаем ближайшие instance (то, что используется для UI “сегодня/текущий инстанс”)
     const instances = await this.db.taskInstance.findMany({
       where: {
         taskId: { in: taskIds },
@@ -336,10 +379,20 @@ export class TasksService {
         // 💡 можно сразу посчитать прогресс
         const total = instEntries.reduce((sum, e) => sum + e.amount, 0);
 
+        // Для SCHEDULED покажем ещё общий прогресс за все дни до конца сегодня
+        const scheduleDaysCount = taskIdToDaysCount.get(instance.taskId) ?? 0;
+        const scheduleDoneSoFar = taskIdToDoneSoFar.get(instance.taskId) ?? 0;
+        const dailyTarget = node.progressMeta?.targetValue ?? 0;
+        const scheduleTargetSoFar = dailyTarget * scheduleDaysCount;
+
         node.currentInstance = {
           ...instance,
           progressEntries: instEntries,
-          progressTotal: total, // 🔥 удобно для фронта
+          progressTotal: total, // “текущий инстанс” (как раньше)
+
+          // “общий прогресс за все дни Schedule” (для UI)
+          scheduleDoneSoFar,
+          scheduleTargetSoFar,
         };
       } else {
         node.currentInstance = null;
