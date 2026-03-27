@@ -319,12 +319,33 @@ export class TasksService {
         })
       : [];
 
+    // Важно:
+    // Если инстанс за день не был создан (или UI отправил прогресс без instanceId),
+    // то taskInstanceId у ProgressEntry будет null. Тогда doneSoFar нужно всё равно учитывать.
+    // Оцениваем “за всё до конца сегодня” по createdAt.
+    const unassignedEntriesUntilToday = await this.db.progressEntry.findMany({
+      where: {
+        taskId: { in: taskIds },
+        taskInstanceId: null,
+        createdAt: { lte: endOfToday },
+      },
+      select: {
+        taskId: true,
+        amount: true,
+      },
+    });
+
     const taskIdToDoneSoFar = new Map<number, number>();
     for (const e of entriesUntilToday) {
       if (!e.taskInstanceId) continue;
       const taskId = instanceIdToTaskId.get(e.taskInstanceId);
       if (!taskId) continue;
       taskIdToDoneSoFar.set(taskId, (taskIdToDoneSoFar.get(taskId) ?? 0) + e.amount);
+    }
+
+    for (const e of unassignedEntriesUntilToday) {
+      const prev = taskIdToDoneSoFar.get(e.taskId) ?? 0;
+      taskIdToDoneSoFar.set(e.taskId, prev + e.amount);
     }
 
     // 🔥 1. Получаем ближайшие instance (то, что используется для UI “сегодня/текущий инстанс”)
